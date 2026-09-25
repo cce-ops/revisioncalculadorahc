@@ -2,8 +2,8 @@
 export async function extraerTexto(archivo: File): Promise<string> {
   const nombre = archivo.name.toLowerCase();
   if (nombre.endsWith(".pdf")) {
-    const pdfjs = await import("pdfjs-dist");
-    const worker = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const worker = await import("pdfjs-dist/legacy/build/pdf.worker.min.mjs?url");
     pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
     const pdf = await pdfjs.getDocument({ data: await archivo.arrayBuffer() }).promise;
     const paginas: string[] = [];
