@@ -3,10 +3,13 @@ import { useState } from "react";
 import {
   analizarExcel,
   evaluarDocumento,
+  revisarExcelConIA,
   USANDO_MOCK,
+  type Referencia,
   type DocOk,
   type ExcelOk,
 } from "@/lib/motor";
+import { ACEPTA, extraerTexto } from "@/lib/extraer-texto";
 import { Aviso, Card, Contador, Lista, Seccion, TarjetaHallazgo } from "@/components/feedback";
 
 export const Route = createFileRoute("/")({
@@ -39,6 +42,10 @@ function App() {
   // Estado de la fase 1 (Excel)
   const [enlace, setEnlace] = useState("");
   const [resultadoExcel, setResultadoExcel] = useState<ExcelOk | null>(null);
+  const [conIA, setConIA] = useState(false);
+  const [revisionIA, setRevisionIA] = useState<DocOk | null>(null);
+  const [referencias, setReferencias] = useState<Referencia[]>([]);
+  const [nombreDoc, setNombreDoc] = useState("");
 
   // Estado de la fase 2 (documento). La API Key vive solo aquí, en memoria.
   const [texto, setTexto] = useState("");
@@ -54,18 +61,31 @@ function App() {
       setError("Pega el enlace de tu Google Sheets para poder comprobarlo.");
       return;
     }
+    if (conIA && !apiKey.trim()) {
+      setError("Para la revisión con IA necesitas tu API Key de Groq.");
+      return;
+    }
     setError("");
     setCargando("excel");
     const res = await analizarExcel(enlace);
+    let rev: DocOk | null = null;
+    if (res.ok && conIA) {
+      const r = await revisarExcelConIA(enlace, apiKey, referencias);
+      setApiKey("");
+      if (r.ok) rev = r;
+      else setError(r.error);
+    }
     setCargando(null);
-    if (res.ok) setResultadoExcel(res);
-    else setError(res.error);
+    if (res.ok) {
+      setRevisionIA(rev);
+      setResultadoExcel(res);
+    } else setError(res.error);
   }
 
   async function evaluarDoc(e: React.FormEvent) {
     e.preventDefault();
     if (!texto.trim()) {
-      setError("Pega el texto de tu documento de evidencias.");
+      setError("Adjunta tu documento (PDF o Word) o pega su texto.");
       return;
     }
     if (!apiKey.trim()) {
@@ -74,7 +94,7 @@ function App() {
     }
     setError("");
     setCargando("documento");
-    const res = await evaluarDocumento(texto, apiKey);
+    const res = await evaluarDocumento(texto, apiKey, referencias);
     setCargando(null);
     if (res.ok) {
       setResultadoDoc(res);
@@ -87,8 +107,40 @@ function App() {
   function volver() {
     setResultadoExcel(null);
     setResultadoDoc(null);
+    setRevisionIA(null);
     setError("");
   }
+
+  async function adjuntarDoc(f: File | undefined) {
+    if (!f) return;
+    try {
+      setTexto(await extraerTexto(f));
+      setNombreDoc(f.name);
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "No se pudo leer el archivo.");
+    }
+  }
+
+  const campoKey = (
+    <div className="space-y-2">
+      <label htmlFor="apikey" className="block text-sm font-semibold">
+        API Key de Groq (gratuita)
+      </label>
+      <input
+        id="apikey"
+        type="password"
+        autoComplete="off"
+        value={apiKey}
+        onChange={(ev) => setApiKey(ev.target.value)}
+        placeholder="gsk_..."
+        className="w-full rounded-lg border border-input bg-card px-4 py-3 font-mono text-base outline-none focus:border-ring focus:ring-2 focus:ring-ring/30"
+      />
+      <p className="text-sm leading-relaxed text-muted-foreground">
+        Obtén tu key gratis en console.groq.com. Se usa solo para esta consulta y no se guarda.
+      </p>
+    </div>
+  );
 
   return (
     <main className="min-h-screen px-4 py-10 sm:py-14">
@@ -119,7 +171,14 @@ function App() {
           {cargando ? (
             <Cargando fase={cargando} />
           ) : resultadoExcel ? (
-            <ResultadosExcel datos={resultadoExcel} onVolver={volver} />
+            <>
+              {revisionIA && (
+                <div className="mb-6">
+                  <ResultadosDoc datos={revisionIA} titulo="🤖 Revisión con IA según apuntes y rúbricas" />
+                </div>
+              )}
+              <ResultadosExcel datos={resultadoExcel} onVolver={volver} />
+            </>
           ) : resultadoDoc ? (
             <ResultadosDoc datos={resultadoDoc} onVolver={volver} />
           ) : (
@@ -148,6 +207,8 @@ function App() {
               <div className="mt-6 space-y-5">
                 {error && <Aviso>{error}</Aviso>}
 
+                <MaterialReferencia referencias={referencias} onChange={setReferencias} onError={setError} />
+
                 {pestana === "excel" ? (
                   <Card>
                     <form onSubmit={comprobarExcel} className="space-y-5">
@@ -167,6 +228,22 @@ function App() {
                           Importante: el archivo debe estar en formato Google Sheets (no .xlsx).
                         </p>
                       </div>
+                      <label className="flex items-start gap-3 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={conIA}
+                          onChange={(ev) => setConIA(ev.target.checked)}
+                          className="mt-1 size-4"
+                        />
+                        <span>
+                          <span className="font-semibold">Añadir revisión con IA</span>
+                          <span className="block text-muted-foreground">
+                            Además de las reglas, la IA comenta tu Excel usando los apuntes y
+                            rúbricas que hayas adjuntado.
+                          </span>
+                        </span>
+                      </label>
+                      {conIA && campoKey}
                       <BotonPrincipal>Comprobar mi Excel</BotonPrincipal>
                     </form>
                   </Card>
@@ -174,37 +251,33 @@ function App() {
                   <Card>
                     <form onSubmit={evaluarDoc} className="space-y-5">
                       <div className="space-y-2">
-                        <label htmlFor="texto" className="block text-sm font-semibold">
-                          Texto de tu documento de evidencias
+                        <span className="block text-sm font-semibold">Tu documento de evidencias</span>
+                        <label className="flex cursor-pointer flex-col items-center gap-1 rounded-lg border-2 border-dashed border-input bg-muted/40 px-4 py-6 text-center text-sm hover:bg-muted">
+                          <span className="font-semibold">📎 Adjuntar PDF o Word</span>
+                          <span className="text-muted-foreground">
+                            {nombreDoc ? `Cargado: ${nombreDoc}` : "Formatos: .pdf, .docx"}
+                          </span>
+                          <input
+                            type="file"
+                            accept={ACEPTA}
+                            className="sr-only"
+                            onChange={(ev) => adjuntarDoc(ev.target.files?.[0])}
+                          />
+                        </label>
+                        <label htmlFor="texto" className="block pt-2 text-sm text-muted-foreground">
+                          …o pega el texto directamente (puedes revisarlo aquí):
                         </label>
                         <textarea
                           id="texto"
                           value={texto}
                           onChange={(ev) => setTexto(ev.target.value)}
-                          rows={12}
+                          rows={8}
                           placeholder="Pega aquí el contenido de tu documento..."
                           className="w-full resize-y rounded-lg border border-input bg-card px-4 py-3 text-base leading-relaxed outline-none focus:border-ring focus:ring-2 focus:ring-ring/30"
                         />
                       </div>
 
-                      <div className="space-y-2">
-                        <label htmlFor="apikey" className="block text-sm font-semibold">
-                          API Key de Groq (gratuita)
-                        </label>
-                        <input
-                          id="apikey"
-                          type="password"
-                          autoComplete="off"
-                          value={apiKey}
-                          onChange={(ev) => setApiKey(ev.target.value)}
-                          placeholder="gsk_..."
-                          className="w-full rounded-lg border border-input bg-card px-4 py-3 font-mono text-base outline-none focus:border-ring focus:ring-2 focus:ring-ring/30"
-                        />
-                        <p className="text-sm leading-relaxed text-muted-foreground">
-                          Obtén tu key gratis en console.groq.com. Se usa solo para esta consulta y
-                          no se guarda.
-                        </p>
-                      </div>
+                      {campoKey}
 
                       <p className="rounded-lg bg-muted px-4 py-3 text-sm text-muted-foreground">
                         Tu API Key es personal. Esta herramienta no la almacena ni la comparte.
@@ -356,7 +429,15 @@ function ResultadosExcel({ datos, onVolver }: { datos: ExcelOk; onVolver: () => 
   );
 }
 
-function ResultadosDoc({ datos, onVolver }: { datos: DocOk; onVolver: () => void }) {
+function ResultadosDoc({
+  datos,
+  onVolver,
+  titulo = "Evaluación de tu documento de evidencias",
+}: {
+  datos: DocOk;
+  onVolver?: () => void;
+  titulo?: string;
+}) {
   const aspectos: Array<[string, string | undefined]> = [
     ["Fuentes", datos.aspectos?.fuentes],
     ["Hipótesis", datos.aspectos?.hipotesis],
@@ -367,7 +448,7 @@ function ResultadosDoc({ datos, onVolver }: { datos: DocOk; onVolver: () => void
 
   return (
     <div className="space-y-6">
-      <h2 className="text-xl font-semibold">Evaluación de tu documento de evidencias</h2>
+      <h2 className="text-xl font-semibold">{titulo}</h2>
 
       {(datos.fortalezas ?? []).length > 0 && (
         <Seccion titulo="✅ Fortalezas" tono="success">
@@ -401,7 +482,89 @@ function ResultadosDoc({ datos, onVolver }: { datos: DocOk; onVolver: () => void
         </Card>
       )}
 
-      <BotonSecundario onClick={onVolver}>Evaluar otro documento</BotonSecundario>
+      {onVolver && <BotonSecundario onClick={onVolver}>Evaluar otro documento</BotonSecundario>}
     </div>
+  );
+}
+
+function MaterialReferencia({
+  referencias,
+  onChange,
+  onError,
+}: {
+  referencias: Referencia[];
+  onChange: (r: Referencia[]) => void;
+  onError: (m: string) => void;
+}) {
+  const [leyendo, setLeyendo] = useState(false);
+
+  async function anadir(files: FileList | null, tipo: Referencia["tipo"]) {
+    if (!files?.length) return;
+    setLeyendo(true);
+    const nuevas: Referencia[] = [];
+    for (const f of Array.from(files)) {
+      try {
+        const texto = await extraerTexto(f);
+        if (texto) nuevas.push({ nombre: f.name, tipo, texto });
+      } catch (e) {
+        onError(e instanceof Error ? e.message : `No se pudo leer ${f.name}.`);
+      }
+    }
+    setLeyendo(false);
+    onChange([...referencias, ...nuevas]);
+  }
+
+  const boton = (tipo: Referencia["tipo"], texto: string) => (
+    <label className="flex-1 cursor-pointer rounded-lg border border-input bg-card px-4 py-3 text-center text-sm font-semibold hover:bg-muted">
+      {texto}
+      <input
+        type="file"
+        multiple
+        accept={ACEPTA}
+        className="sr-only"
+        onChange={(ev) => {
+          void anadir(ev.target.files, tipo);
+          ev.target.value = "";
+        }}
+      />
+    </label>
+  );
+
+  return (
+    <Card className="space-y-4">
+      <div>
+        <h2 className="text-base font-semibold">📚 Apuntes y rúbricas (opcional)</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          La IA los usará como referencia al evaluar tu documento y tu Excel. No se guardan.
+        </p>
+      </div>
+      <div className="flex flex-col gap-2 sm:flex-row">
+        {boton("apuntes", "+ Añadir apuntes")}
+        {boton("rubrica", "+ Añadir rúbrica")}
+      </div>
+      {leyendo && <p className="text-sm text-muted-foreground">Leyendo archivos…</p>}
+      {referencias.length > 0 && (
+        <ul className="space-y-2">
+          {referencias.map((r, i) => (
+            <li
+              key={i}
+              className="flex items-center justify-between gap-3 rounded-lg bg-muted px-4 py-2 text-sm"
+            >
+              <span className="truncate">
+                {r.tipo === "rubrica" ? "📏" : "📘"} {r.nombre}
+              </span>
+              <button
+                type="button"
+                onClick={() => onChange(referencias.filter((_, j) => j !== i))}
+                className="shrink-0 text-muted-foreground hover:text-foreground"
+                aria-label={`Quitar ${r.nombre}`}
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }
