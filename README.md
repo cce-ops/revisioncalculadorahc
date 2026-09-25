@@ -4,6 +4,9 @@ Herramienta web **anónima** para que el alumnado autoevalúe su actividad de Hu
 Economía Circular. Sin login, sin base de datos, sin historial, sin `localStorage`, sin cookies y
 sin analítica.
 
+https://revisioncalculadorahc.lovable.app/
+
+
 Dos funcionalidades, en pestañas:
 
 1. **📊 Comprobar mi Excel** — reglas duras, sin IA. Se envía el enlace del Google Sheets al motor
