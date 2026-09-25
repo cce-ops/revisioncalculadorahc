@@ -49,7 +49,18 @@ export interface RespuestaError {
 /** Modelo fijo para la evaluación con IA. */
 export const MODELO_LLM = "llama-3.3-70b-versatile";
 
-const MOTOR_URL = (import.meta.env["VITE_MOTOR_URL"] as string | undefined)?.trim() ?? "";
+import { MOTOR_URL_CONFIG } from "@/config";
+
+const MOTOR_URL = (
+  MOTOR_URL_CONFIG || ((import.meta.env["VITE_MOTOR_URL"] as string | undefined) ?? "")
+).trim();
+
+/** Material de referencia (apuntes, rúbricas) que el alumno adjunta. */
+export interface Referencia {
+  nombre: string;
+  tipo: "apuntes" | "rubrica";
+  texto: string;
+}
 
 /** Sin URL configurada (o valor "mock") se usan datos de ejemplo para probar la UI. */
 export const USANDO_MOCK = MOTOR_URL === "" || MOTOR_URL.toLowerCase() === "mock";
@@ -175,6 +186,7 @@ export async function analizarExcel(enlace: string): Promise<ExcelOk | Respuesta
 export async function evaluarDocumento(
   texto: string,
   apiKey: string,
+  referencias: Referencia[] = [],
 ): Promise<DocOk | RespuestaError> {
   if (USANDO_MOCK) {
     await espera(1800);
@@ -185,7 +197,7 @@ export async function evaluarDocumento(
       method: "POST",
       // text/plain evita el preflight CORS que Apps Script no responde.
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ texto, apiKey, modelo: MODELO_LLM }),
+      body: JSON.stringify({ accion: "evaluarDocumento", texto, apiKey, modelo: MODELO_LLM, referencias }),
     });
     return await leerJson<DocOk>(res);
   } catch {
@@ -193,5 +205,42 @@ export async function evaluarDocumento(
       ok: false,
       error: "No se pudo evaluar tu documento. Verifica tu API Key y vuelve a intentarlo.",
     };
+  }
+}
+
+const MOCK_REVISION_EXCEL: DocOk = {
+  ok: true,
+  fortalezas: ["La estructura del inventario sigue el orden que pide la rúbrica."],
+  debilidades: [
+    "La rúbrica exige justificar cada factor de emisión y dos filas no tienen fuente.",
+  ],
+  preguntas_socraticas: ["¿Qué criterio de la rúbrica crees que cubre peor tu escenario B?"],
+};
+
+/** Revisión con IA del Excel, usando apuntes y rúbricas como referencia. */
+export async function revisarExcelConIA(
+  enlace: string,
+  apiKey: string,
+  referencias: Referencia[],
+): Promise<DocOk | RespuestaError> {
+  if (USANDO_MOCK) {
+    await espera(1500);
+    return MOCK_REVISION_EXCEL;
+  }
+  try {
+    const res = await fetch(MOTOR_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({
+        accion: "revisarExcel",
+        url: normalizarEnlaceSheets(enlace),
+        apiKey,
+        modelo: MODELO_LLM,
+        referencias,
+      }),
+    });
+    return await leerJson<DocOk>(res);
+  } catch {
+    return { ok: false, error: "No se pudo hacer la revisión con IA del Excel." };
   }
 }
